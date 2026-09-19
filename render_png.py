@@ -86,6 +86,7 @@ RIGHT_BADGE_Y = 22
 PLAYER_IMAGE_MAP: dict[str, str] = {}
 PLAYER_IMAGE_KEYS: list[str] = []
 PLAYER_LOCAL_FACE_MAP: dict[str, Path] = {}
+ESPN_MLB_IMAGE_MAP_CACHE: dict[str, str] | None = None
 IMAGE_FAILURE_LOG = OUT_DIR / "image_failures.log"
 MISSING_LOOKUP_LOG = OUT_DIR / "missing_in_lookup.log"
 
@@ -382,6 +383,50 @@ def _load_lookup_image_map_from_sheet() -> dict[str, str]:
     return out
 
 
+def _load_espn_mlb_image_map() -> dict[str, str]:
+    """Build an exact-name MLB headshot map from current ESPN team rosters."""
+    global ESPN_MLB_IMAGE_MAP_CACHE
+    if ESPN_MLB_IMAGE_MAP_CACHE is not None:
+        return ESPN_MLB_IMAGE_MAP_CACHE
+
+    team_slugs = [
+        "ari", "atl", "bal", "bos", "chc", "chw", "cin", "cle", "col", "det",
+        "hou", "kc", "laa", "lad", "mia", "mil", "min", "nym", "nyy", "ath",
+        "phi", "pit", "sd", "sf", "sea", "stl", "tb", "tex", "tor", "wsh",
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Referer": "https://www.espn.com/",
+    }
+    image_map: dict[str, str] = {}
+    failed_teams: list[str] = []
+    for team in team_slugs:
+        url = (
+            "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/teams/"
+            f"{team}/roster"
+        )
+        try:
+            req = Request(url, headers=headers)
+            with urlopen(req, timeout=20) as response:
+                payload = json.load(response)
+        except Exception:
+            failed_teams.append(team)
+            continue
+        for group in payload.get("athletes", []):
+            for player in group.get("items", []):
+                name = clean_name(player.get("fullName") or player.get("displayName") or "")
+                headshot = (player.get("headshot") or {}).get("href", "").strip()
+                if name and headshot:
+                    image_map[name] = headshot
+
+    ESPN_MLB_IMAGE_MAP_CACHE = image_map
+    print(f"[render_png] ESPN MLB headshots loaded: {len(image_map)}")
+    if failed_teams:
+        print(f"[render_png] ESPN roster requests failed: {','.join(failed_teams)}")
+    return image_map
+
+
 def _get_google_creds():
     sa_path = _resolve_service_account_path()
     if not sa_path:
@@ -514,15 +559,9 @@ def _dedupe_players(rows: list[dict[str, str]]) -> list[dict[str, str]]:
 
 
 def _player_image_url(row: dict[str, str]) -> str:
-    # PropsCash style: lookup map first.
+    # ESPN-only exact-name matching. Missing ESPN headshots stay blank.
     name_lookup = clean_name(row.get("player_name", ""))
-    if name_lookup and PLAYER_IMAGE_MAP:
-        if name_lookup in PLAYER_IMAGE_MAP:
-            return PLAYER_IMAGE_MAP[name_lookup]
-        near = difflib.get_close_matches(name_lookup, PLAYER_IMAGE_KEYS, n=1, cutoff=0.88)
-        if near:
-            return PLAYER_IMAGE_MAP.get(near[0], "")
-    return (row.get("player_img_url") or row.get("player_image_url") or "").strip()
+    return PLAYER_IMAGE_MAP.get(name_lookup, "") if name_lookup else ""
 
 
 def _normalize_name(name: str) -> str:
@@ -724,14 +763,6 @@ def _paste_player_avatar(base: Image.Image, row: dict[str, str], pbox: dict[str,
     img_path = _download_image_cached(url, player_name=name_key)
     if img_path:
         _debug(f"[render_png][{mode}] player='{name_key}' cache='{img_path.name}'")
-    if not img_path and name_key and PLAYER_LOCAL_FACE_MAP:
-        match = _best_fuzzy_name(name_key, list(PLAYER_LOCAL_FACE_MAP.keys()))
-        if match:
-            img_path = PLAYER_LOCAL_FACE_MAP.get(match)
-            if img_path:
-                _debug(
-                    f"[render_png][{mode}] player='{name_key}' reused_local_from='{match}' file='{img_path.name}'"
-                )
     if not img_path:
         _debug(f"[render_png][{mode}] player='{name_key}' skip=no_image")
         return
@@ -740,8 +771,6 @@ def _paste_player_avatar(base: Image.Image, row: dict[str, str], pbox: dict[str,
     except Exception:
         _debug(f"[render_png][{mode}] player='{name_key}' skip=bad_image_file")
         return
-
-    avatar = _crop_propsedge_bottom_matte(avatar)
 
     resample_lanczos = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
 
@@ -1235,22 +1264,12 @@ def render_mode(cfg: ModeCfg, rows_override: list[dict[str, str]] | None = None,
 
 def render_all_categories(cfg: ModeCfg) -> list[Path]:
     all_rows = read_rows(cfg.csv_path)
-    # Build image lookup map (PropsCash-style) from local lookup first.
+    # Build one ESPN-only exact-name lookup. Never fall back to PropsEdge images.
     global PLAYER_IMAGE_MAP, PLAYER_IMAGE_KEYS, PLAYER_LOCAL_FACE_MAP
     PLAYER_LOCAL_FACE_MAP = {}
-    sheet_map = _load_lookup_image_map_from_sheet()
-    PLAYER_IMAGE_MAP = sheet_map
-    if sheet_map:
-        print(
-            f"[render_png] using lookup sheet: {LOOKUP_SHEET_ID} / {LOOKUP_SHEET_TAB} "
-            f"({len(sheet_map)} players)"
-        )
-    else:
-        PLAYER_IMAGE_MAP = _load_lookup_image_map(PLAYER_LOOKUP_CSV)
-    if PLAYER_IMAGE_MAP and not sheet_map:
-        print(f"[render_png] using lookup file: {PLAYER_LOOKUP_CSV.name} ({len(PLAYER_IMAGE_MAP)} players)")
+    PLAYER_IMAGE_MAP = _load_espn_mlb_image_map()
     if not PLAYER_IMAGE_MAP:
-        print("[render_png] WARNING: no lookup map loaded (sheet/file). Player faces may be missing.")
+        print("[render_png] WARNING: ESPN MLB lookup unavailable. Player faces will be blank.")
     PLAYER_IMAGE_KEYS = list(PLAYER_IMAGE_MAP.keys())
 
     outputs: list[Path] = []
