@@ -37,6 +37,32 @@ GOOGLE_SCOPES = [
 PNG_OUT_DIR = BASE_DIR / "generated_png"
 
 SPORT_CONFIGS = {
+    "NFL": {
+        "label": "NFL",
+        "key": "nfl",
+        "href_slug": "nfl",
+        "image_slug": "nfl",
+        "target_props": [
+            "Player Field Goals",
+            "Player Kicking Points",
+            "Player Pass Rush Yds",
+            "Player Pass Attempts",
+            "Player Pass Completions",
+            "Player Pass Longest Completion",
+            "Player Pass TDs",
+            "Player Pass Yds",
+            "Player Reception Longest",
+            "Player Reception Yds",
+            "Player Receptions",
+            "Player Rush Reception Yds",
+            "Player Rush Attempts",
+            "Player Rush Longest",
+            "Player Rush Yds",
+            "Player Sacks",
+            "Player Tackles + Assists",
+            "Player Targets",
+        ],
+    },
     "NBA": {
         "label": "NBA",
         "key": "nba",
@@ -855,7 +881,11 @@ def sync_outputs_to_google(log, output_suffix: str) -> None:
     if not csv_path.exists():
         log(f"Skip Google sync, file not found: {csv_path.name}")
         return
-    tab_name = "Demons" if output_suffix == "demons" else "Goblins"
+    base_tab_name = "Demons" if output_suffix == "demons" else "Goblins"
+    sport_label = active_sport_config()["label"]
+    # Preserve the established MLB tabs. Other sports receive their own tabs
+    # so an NFL run cannot overwrite the MLB scan results.
+    tab_name = base_tab_name if sport_label == "MLB" else f"{sport_label} {base_tab_name}"
     sheets_service, drive_service = get_google_services()
     update_sheet_from_csv(sheets_service, SHEET_ID, tab_name, csv_path)
     log(f"Updated Google Sheet tab '{tab_name}' from {csv_path.name}")

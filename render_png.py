@@ -88,6 +88,8 @@ PLAYER_IMAGE_KEYS: list[str] = []
 PLAYER_LOCAL_FACE_MAP: dict[str, Path] = {}
 ESPN_MLB_IMAGE_MAP_CACHE: dict[str, str] | None = None
 ESPN_MLB_DISK_CACHE = BASE_DIR / "espn_mlb_headshots_cache.json"
+ESPN_NFL_IMAGE_MAP_CACHE: dict[str, str] | None = None
+ESPN_NFL_DISK_CACHE = BASE_DIR / "espn_nfl_headshots_cache.json"
 IMAGE_FAILURE_LOG = OUT_DIR / "image_failures.log"
 MISSING_LOOKUP_LOG = OUT_DIR / "missing_in_lookup.log"
 
@@ -131,6 +133,26 @@ DEMONS = ModeCfg(
 
 # (output_slug, selected_prop_in_csv)
 CATEGORY_SPECS_BY_SPORT: dict[str, list[tuple[str, str]]] = {
+    "NFL": [
+        ("field_goals", "Player Field Goals"),
+        ("kicking_points", "Player Kicking Points"),
+        ("pass_rush_yds", "Player Pass Rush Yds"),
+        ("pass_attempts", "Player Pass Attempts"),
+        ("pass_completions", "Player Pass Completions"),
+        ("pass_longest_completion", "Player Pass Longest Completion"),
+        ("pass_tds", "Player Pass TDs"),
+        ("pass_yds", "Player Pass Yds"),
+        ("reception_longest", "Player Reception Longest"),
+        ("reception_yds", "Player Reception Yds"),
+        ("receptions", "Player Receptions"),
+        ("rush_reception_yds", "Player Rush Reception Yds"),
+        ("rush_attempts", "Player Rush Attempts"),
+        ("rush_longest", "Player Rush Longest"),
+        ("rush_yds", "Player Rush Yds"),
+        ("sacks", "Player Sacks"),
+        ("tackles_assists", "Player Tackles + Assists"),
+        ("targets", "Player Targets"),
+    ],
     "NBA": [
         ("points", "Player Points"),
         ("assists", "Player Assists"),
@@ -454,6 +476,78 @@ def _load_espn_mlb_image_map() -> dict[str, str]:
     print(f"[render_png] ESPN MLB headshots loaded: {len(image_map)}")
     if failed_teams:
         print(f"[render_png] ESPN roster requests failed: {','.join(failed_teams)}")
+    return image_map
+
+
+def _load_espn_nfl_image_map() -> dict[str, str]:
+    """Build a resilient exact-name NFL headshot map from ESPN rosters."""
+    global ESPN_NFL_IMAGE_MAP_CACHE
+    if ESPN_NFL_IMAGE_MAP_CACHE is not None:
+        return ESPN_NFL_IMAGE_MAP_CACHE
+
+    disk_cache: dict[str, str] = {}
+    cache_age = None
+    try:
+        if ESPN_NFL_DISK_CACHE.exists():
+            disk_cache = json.loads(ESPN_NFL_DISK_CACHE.read_text(encoding="utf-8"))
+            cache_age = time.time() - ESPN_NFL_DISK_CACHE.stat().st_mtime
+    except Exception:
+        disk_cache = {}
+    if disk_cache and cache_age is not None and cache_age < 12 * 60 * 60:
+        ESPN_NFL_IMAGE_MAP_CACHE = disk_cache
+        print(f"[render_png] ESPN NFL headshots loaded from cache: {len(disk_cache)}")
+        return disk_cache
+
+    team_slugs = [
+        "ari", "atl", "bal", "buf", "car", "chi", "cin", "cle",
+        "dal", "den", "det", "gb", "hou", "ind", "jax", "kc",
+        "lv", "lac", "lar", "mia", "min", "ne", "no", "nyg",
+        "nyj", "phi", "pit", "sea", "sf", "tb", "ten", "wsh",
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Referer": "https://www.espn.com/",
+    }
+    image_map: dict[str, str] = dict(disk_cache)
+    failed_teams: list[str] = []
+    for team in team_slugs:
+        url = (
+            "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/"
+            f"{team}/roster"
+        )
+        payload = None
+        for attempt in range(1, 4):
+            try:
+                req = Request(url, headers=headers)
+                with urlopen(req, timeout=20) as response:
+                    payload = json.load(response)
+                break
+            except Exception:
+                if attempt < 3:
+                    time.sleep(0.6 * attempt)
+        if payload is None:
+            failed_teams.append(team)
+            continue
+        for group in payload.get("athletes", []):
+            for player in group.get("items", []):
+                name = clean_name(player.get("fullName") or player.get("displayName") or "")
+                headshot = (player.get("headshot") or {}).get("href", "").strip()
+                if name and headshot:
+                    image_map[name] = headshot
+
+    try:
+        ESPN_NFL_DISK_CACHE.write_text(
+            json.dumps(image_map, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"[render_png] ESPN NFL cache write failed: {e}")
+
+    ESPN_NFL_IMAGE_MAP_CACHE = image_map
+    print(f"[render_png] ESPN NFL headshots loaded: {len(image_map)}")
+    if failed_teams:
+        print(f"[render_png] ESPN NFL roster requests failed: {','.join(failed_teams)}")
     return image_map
 
 
@@ -1292,9 +1386,13 @@ def render_all_categories(cfg: ModeCfg) -> list[Path]:
     # Build one ESPN-only exact-name lookup. Never fall back to PropsEdge images.
     global PLAYER_IMAGE_MAP, PLAYER_IMAGE_KEYS, PLAYER_LOCAL_FACE_MAP
     PLAYER_LOCAL_FACE_MAP = {}
-    PLAYER_IMAGE_MAP = _load_espn_mlb_image_map()
+    sport = (os.getenv("PROPSEDGE_SPORT") or os.getenv("SPORT") or "MLB").strip().upper()
+    if sport == "NFL":
+        PLAYER_IMAGE_MAP = _load_espn_nfl_image_map()
+    else:
+        PLAYER_IMAGE_MAP = _load_espn_mlb_image_map()
     if not PLAYER_IMAGE_MAP:
-        print("[render_png] WARNING: ESPN MLB lookup unavailable. Player faces will be blank.")
+        print(f"[render_png] WARNING: ESPN {sport} lookup unavailable. Player faces will be blank.")
     PLAYER_IMAGE_KEYS = list(PLAYER_IMAGE_MAP.keys())
 
     outputs: list[Path] = []
