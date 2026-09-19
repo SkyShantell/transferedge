@@ -9,6 +9,7 @@ import re
 import time
 import difflib
 import os
+from collections import deque
 from datetime import datetime
 from io import BytesIO
 from dataclasses import dataclass
@@ -680,6 +681,53 @@ def _load_badge_icon(mode: str, side: str = "right") -> Image.Image | None:
         return None
 
 
+def _soft_remove_edge_background(image: Image.Image) -> Image.Image:
+    """Softly remove only a neutral matte connected to the image edge."""
+    im = image.convert("RGBA")
+    width, height = im.size
+    if width < 3 or height < 3:
+        return im
+
+    px = im.load()
+    samples = [
+        px[0, 0][:3], px[width - 1, 0][:3],
+        px[0, height - 1][:3], px[width - 1, height - 1][:3],
+    ]
+    bg = tuple(sorted(c[i] for c in samples)[len(samples) // 2] for i in range(3))
+    if max(bg) - min(bg) > 28:
+        return im
+
+    hard, soft = 16.0, 38.0
+    queue: deque[tuple[int, int]] = deque()
+    seen: set[tuple[int, int]] = set()
+    for x in range(width):
+        queue.extend(((x, 0), (x, height - 1)))
+    for y in range(height):
+        queue.extend(((0, y), (width - 1, y)))
+
+    while queue:
+        x, y = queue.popleft()
+        if (x, y) in seen:
+            continue
+        seen.add((x, y))
+        r, g, b, a = px[x, y]
+        distance = ((r - bg[0]) ** 2 + (g - bg[1]) ** 2 + (b - bg[2]) ** 2) ** 0.5
+        neutral = max(r, g, b) - min(r, g, b) <= 34
+        if not neutral or distance > soft:
+            continue
+        new_alpha = 0 if distance <= hard else int(a * (distance - hard) / (soft - hard))
+        px[x, y] = (r, g, b, new_alpha)
+        if x:
+            queue.append((x - 1, y))
+        if x + 1 < width:
+            queue.append((x + 1, y))
+        if y:
+            queue.append((x, y - 1))
+        if y + 1 < height:
+            queue.append((x, y + 1))
+    return im
+
+
 def _paste_player_avatar(base: Image.Image, row: dict[str, str], pbox: dict[str, float], mode: str) -> None:
     name_key = (row.get("player_name", "") or "").strip()
     _debug(f"[render_png][{mode}] player='{name_key}' start")
@@ -724,6 +772,7 @@ def _paste_player_avatar(base: Image.Image, row: dict[str, str], pbox: dict[str,
     scale = target_h / max(1, avatar.height)
     target_w = int(avatar.width * scale)
     avatar = avatar.resize((target_w, target_h), resample_lanczos)
+    avatar = _soft_remove_edge_background(avatar)
 
     # Use a fixed anchor in the left player-image column.
     # Text box X from templates is not reliable for image placement.
@@ -1090,18 +1139,24 @@ def _render_png_fallback(cfg: ModeCfg, rows: list[dict[str, str]], out_png: Path
     icon_path = TEMPLATE_DIR / icon_name
     mode_icon = None
     if icon_path.exists():
-        mode_icon = contain(Image.open(icon_path), (110, 96))
-        img.alpha_composite(mode_icon, (730 - mode_icon.width // 2, 130))
+        icon_source = Image.open(icon_path).convert("RGBA")
+        icon_bbox = icon_source.getchannel("A").getbbox()
+        if icon_bbox:
+            icon_source = icon_source.crop(icon_bbox)
+        mode_icon = contain(icon_source, (145, 125))
+        img.alpha_composite(mode_icon, (720 - mode_icon.width // 2, 128))
 
     # Sky Knows Bets logo and PrizePicks promo code.
     logo_path = TEMPLATE_DIR / "SKB_LOGO_Transparent.PNG"
     if logo_path.exists():
         logo = contain(Image.open(logo_path), (230, 215))
         img.alpha_composite(logo, (825 + (230 - logo.width) // 2, 34))
-        promo_font = _font(13)
-        promo = "USE CODE: SCRAP ON PRIZEPICKS"
-        px = 940 - draw.textlength(promo, font=promo_font) / 2
-        draw.text((px, 253), promo, font=promo_font, fill=(30, 32, 35, 255))
+        promo_box = (816, 230, 1064, 282)
+        draw.rounded_rectangle(promo_box, 16, fill=(119, 0, 255, 255))
+        promo_main_font = _font(20)
+        promo_sub_font = _font(12)
+        draw.text((940, 238), "USE CODE: SCRAP", font=promo_main_font, fill=white, anchor="ma")
+        draw.text((940, 264), "ON PRIZEPICKS", font=promo_sub_font, fill=white, anchor="ma")
 
     for label, x in (("PLAYER", 185), ("PROP", 470), ("TENDENCY", 710), ("MODEL", 932)):
         draw.text((x, 294), label, font=f_col, fill=(72, 76, 80, 255), anchor="mm")
