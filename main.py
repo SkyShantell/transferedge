@@ -1809,17 +1809,27 @@ def click_sport_and_scrape(
     except PlaywrightTimeoutError:
         log(f"Load wait after {sport_cfg['label']} click timed out; continuing")
 
-    settings_btn = page.get_by_role("button", name="Settings").first
-    settings_btn.wait_for(state="visible", timeout=15000)
+    # PropsEdge removed the old #tour-settings-panel. Filters now live in the
+    # always-rendered #tour-filter-controls row. On narrower viewports the
+    # Settings button only reveals that row; it is no longer a panel itself.
+    filter_controls = page.locator("#tour-filter-controls").first
     try:
-        settings_btn.click(timeout=15000)
+        filter_controls.wait_for(state="visible", timeout=10000)
+        log("Projection filter controls ready")
     except PlaywrightTimeoutError:
-        settings_btn.scroll_into_view_if_needed(timeout=5000)
-        settings_btn.click(timeout=15000, force=True)
-    log("Clicked Settings")
+        settings_btn = page.get_by_role("button", name="Settings").first
+        settings_btn.wait_for(state="visible", timeout=10000)
+        try:
+            settings_btn.click(timeout=10000)
+        except PlaywrightTimeoutError:
+            settings_btn.scroll_into_view_if_needed(timeout=5000)
+            settings_btn.click(timeout=10000, force=True)
+        filter_controls.wait_for(state="visible", timeout=10000)
+        log("Opened projection filter controls")
 
-    settings_panel = page.locator("#tour-settings-panel").first
-    settings_panel.wait_for(state="visible", timeout=10000)
+    # Modifier dropdowns are rendered in a portal outside the filter row, so
+    # toggle discovery must use the document rather than the removed panel.
+    settings_panel = page.locator("body")
 
     def enable_toggle(toggle_name: str, required: bool = True) -> bool:
         def _make_candidates() -> list:
@@ -1971,6 +1981,19 @@ def click_sport_and_scrape(
             return False
 
     def open_modifiers_panel(log) -> None:
+        current_modifier_control = page.locator(
+            "[role='button'][aria-label='Modifier filter']"
+        ).first
+        try:
+            if current_modifier_control.count() > 0:
+                current_modifier_control.wait_for(state="visible", timeout=5000)
+                current_modifier_control.click(timeout=5000)
+                log("Clicked Modifier filter")
+                page.wait_for_timeout(500)
+                return
+        except Exception:
+            pass
+
         for label in ["Modifiers", "Modifier"]:
             candidates = [
                 page.get_by_role("button", name=re.compile(rf"^{re.escape(label)}$", re.IGNORECASE)).first,
