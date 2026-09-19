@@ -9,7 +9,6 @@ import re
 import time
 import difflib
 import os
-from collections import deque
 from datetime import datetime
 from io import BytesIO
 from dataclasses import dataclass
@@ -681,50 +680,37 @@ def _load_badge_icon(mode: str, side: str = "right") -> Image.Image | None:
         return None
 
 
-def _soft_remove_edge_background(image: Image.Image) -> Image.Image:
-    """Softly remove only a neutral matte connected to the image edge."""
+def _remove_propsedge_bottom_matte(image: Image.Image) -> Image.Image:
+    """Fade the opaque PropsEdge matte only from the lower outer corners.
+
+    PropsEdge headshots already have transparent upper backgrounds, but some
+    include an opaque gray base at both lower corners. A geometric feather is
+    safer than color-keying because it never cuts into faces or the center of
+    the player's uniform.
+    """
     im = image.convert("RGBA")
     width, height = im.size
     if width < 3 or height < 3:
         return im
-
     px = im.load()
-    samples = [
-        px[0, 0][:3], px[width - 1, 0][:3],
-        px[0, height - 1][:3], px[width - 1, height - 1][:3],
-    ]
-    bg = tuple(sorted(c[i] for c in samples)[len(samples) // 2] for i in range(3))
-    if max(bg) - min(bg) > 28:
+
+    # Only apply this correction to the partially transparent PropsEdge style.
+    if px[0, 0][3] > 20 or px[width - 1, 0][3] > 20:
         return im
 
-    hard, soft = 16.0, 38.0
-    queue: deque[tuple[int, int]] = deque()
-    seen: set[tuple[int, int]] = set()
-    for x in range(width):
-        queue.extend(((x, 0), (x, height - 1)))
-    for y in range(height):
-        queue.extend(((0, y), (width - 1, y)))
-
-    while queue:
-        x, y = queue.popleft()
-        if (x, y) in seen:
-            continue
-        seen.add((x, y))
-        r, g, b, a = px[x, y]
-        distance = ((r - bg[0]) ** 2 + (g - bg[1]) ** 2 + (b - bg[2]) ** 2) ** 0.5
-        neutral = max(r, g, b) - min(r, g, b) <= 34
-        if not neutral or distance > soft:
-            continue
-        new_alpha = 0 if distance <= hard else int(a * (distance - hard) / (soft - hard))
-        px[x, y] = (r, g, b, new_alpha)
-        if x:
-            queue.append((x - 1, y))
-        if x + 1 < width:
-            queue.append((x + 1, y))
-        if y:
-            queue.append((x, y - 1))
-        if y + 1 < height:
-            queue.append((x, y + 1))
+    start_y = int(height * 0.54)
+    center = (width - 1) / 2.0
+    for y in range(start_y, height):
+        progress = (y - start_y) / max(1, height - 1 - start_y)
+        protected_half = width * (0.43 - 0.08 * progress)
+        feather = width * 0.075
+        for x in range(width):
+            distance_from_center = abs(x - center)
+            if distance_from_center <= protected_half:
+                continue
+            r, g, b, a = px[x, y]
+            fade = 1.0 - min(1.0, (distance_from_center - protected_half) / feather)
+            px[x, y] = (r, g, b, int(a * fade))
     return im
 
 
@@ -772,7 +758,7 @@ def _paste_player_avatar(base: Image.Image, row: dict[str, str], pbox: dict[str,
     scale = target_h / max(1, avatar.height)
     target_w = int(avatar.width * scale)
     avatar = avatar.resize((target_w, target_h), resample_lanczos)
-    avatar = _soft_remove_edge_background(avatar)
+    avatar = _remove_propsedge_bottom_matte(avatar)
 
     # Use a fixed anchor in the left player-image column.
     # Text box X from templates is not reliable for image placement.
@@ -1143,8 +1129,16 @@ def _render_png_fallback(cfg: ModeCfg, rows: list[dict[str, str]], out_png: Path
         icon_bbox = icon_source.getchannel("A").getbbox()
         if icon_bbox:
             icon_source = icon_source.crop(icon_bbox)
-        mode_icon = contain(icon_source, (145, 125))
-        img.alpha_composite(mode_icon, (720 - mode_icon.width // 2, 128))
+        # Intentionally oversized: clip it to the title panel so the character
+        # fills the right side without covering the title or table headings.
+        mode_icon = contain(icon_source, (330, 300))
+        icon_x = 790 - mode_icon.width
+        icon_y = 118 + (162 - mode_icon.height) // 2
+        crop_top = max(0, 118 - icon_y)
+        crop_bottom = min(mode_icon.height, 280 - icon_y)
+        if crop_bottom > crop_top:
+            visible_icon = mode_icon.crop((0, crop_top, mode_icon.width, crop_bottom))
+            img.alpha_composite(visible_icon, (icon_x, max(118, icon_y)))
 
     # Sky Knows Bets logo and PrizePicks promo code.
     logo_path = TEMPLATE_DIR / "SKB_LOGO_Transparent.PNG"
