@@ -680,38 +680,30 @@ def _load_badge_icon(mode: str, side: str = "right") -> Image.Image | None:
         return None
 
 
-def _remove_propsedge_bottom_matte(image: Image.Image) -> Image.Image:
-    """Fade the opaque PropsEdge matte only from the lower outer corners.
-
-    PropsEdge headshots already have transparent upper backgrounds, but some
-    include an opaque gray base at both lower corners. A geometric feather is
-    safer than color-keying because it never cuts into faces or the center of
-    the player's uniform.
-    """
+def _crop_propsedge_bottom_matte(image: Image.Image) -> Image.Image:
+    """Crop before the opaque lower matte begins in PropsEdge headshots."""
     im = image.convert("RGBA")
     width, height = im.size
     if width < 3 or height < 3:
         return im
     px = im.load()
-
-    # Only apply this correction to the partially transparent PropsEdge style.
     if px[0, 0][3] > 20 or px[width - 1, 0][3] > 20:
         return im
 
-    start_y = int(height * 0.54)
-    center = (width - 1) / 2.0
-    for y in range(start_y, height):
-        progress = (y - start_y) / max(1, height - 1 - start_y)
-        protected_half = width * (0.43 - 0.08 * progress)
-        feather = width * 0.075
-        for x in range(width):
-            distance_from_center = abs(x - center)
-            if distance_from_center <= protected_half:
-                continue
-            r, g, b, a = px[x, y]
-            fade = 1.0 - min(1.0, (distance_from_center - protected_half) / feather)
-            px[x, y] = (r, g, b, int(a * fade))
-    return im
+    edge_width = max(4, int(width * 0.18))
+    edge_xs = list(range(edge_width)) + list(range(width - edge_width, width))
+    run = 0
+    matte_start = None
+    for y in range(int(height * 0.45), height):
+        opaque_ratio = sum(1 for x in edge_xs if px[x, y][3] >= 220) / len(edge_xs)
+        run = run + 1 if opaque_ratio >= 0.62 else 0
+        if run >= 5:
+            matte_start = y - run + 1
+            break
+    if matte_start is None:
+        return im
+    crop_bottom = max(int(height * 0.62), matte_start)
+    return im.crop((0, 0, width, crop_bottom))
 
 
 def _paste_player_avatar(base: Image.Image, row: dict[str, str], pbox: dict[str, float], mode: str) -> None:
@@ -749,7 +741,7 @@ def _paste_player_avatar(base: Image.Image, row: dict[str, str], pbox: dict[str,
         _debug(f"[render_png][{mode}] player='{name_key}' skip=bad_image_file")
         return
 
-    # Keep original ESPN canvas framing for consistent row-to-row alignment.
+    avatar = _crop_propsedge_bottom_matte(avatar)
 
     resample_lanczos = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
 
@@ -758,7 +750,6 @@ def _paste_player_avatar(base: Image.Image, row: dict[str, str], pbox: dict[str,
     scale = target_h / max(1, avatar.height)
     target_w = int(avatar.width * scale)
     avatar = avatar.resize((target_w, target_h), resample_lanczos)
-    avatar = _remove_propsedge_bottom_matte(avatar)
 
     # Use a fixed anchor in the left player-image column.
     # Text box X from templates is not reliable for image placement.
@@ -1131,7 +1122,13 @@ def _render_png_fallback(cfg: ModeCfg, rows: list[dict[str, str]], out_png: Path
             icon_source = icon_source.crop(icon_bbox)
         # Intentionally oversized: clip it to the title panel so the character
         # fills the right side without covering the title or table headings.
-        mode_icon = contain(icon_source, (330, 300))
+        # Pillow's thumbnail() never enlarges small source art, so resize it
+        # explicitly to make the visible character genuinely much larger.
+        icon_scale = min(330 / icon_source.width, 300 / icon_source.height)
+        mode_icon = icon_source.resize(
+            (max(1, int(icon_source.width * icon_scale)), max(1, int(icon_source.height * icon_scale))),
+            Image.Resampling.LANCZOS,
+        )
         icon_x = 790 - mode_icon.width
         icon_y = 118 + (162 - mode_icon.height) // 2
         crop_top = max(0, 118 - icon_y)
