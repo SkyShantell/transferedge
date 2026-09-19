@@ -87,6 +87,7 @@ PLAYER_IMAGE_MAP: dict[str, str] = {}
 PLAYER_IMAGE_KEYS: list[str] = []
 PLAYER_LOCAL_FACE_MAP: dict[str, Path] = {}
 ESPN_MLB_IMAGE_MAP_CACHE: dict[str, str] | None = None
+ESPN_MLB_DISK_CACHE = BASE_DIR / "espn_mlb_headshots_cache.json"
 IMAGE_FAILURE_LOG = OUT_DIR / "image_failures.log"
 MISSING_LOOKUP_LOG = OUT_DIR / "missing_in_lookup.log"
 
@@ -384,10 +385,23 @@ def _load_lookup_image_map_from_sheet() -> dict[str, str]:
 
 
 def _load_espn_mlb_image_map() -> dict[str, str]:
-    """Build an exact-name MLB headshot map from current ESPN team rosters."""
+    """Build a resilient exact-name MLB headshot map from ESPN rosters."""
     global ESPN_MLB_IMAGE_MAP_CACHE
     if ESPN_MLB_IMAGE_MAP_CACHE is not None:
         return ESPN_MLB_IMAGE_MAP_CACHE
+
+    disk_cache: dict[str, str] = {}
+    cache_age = None
+    try:
+        if ESPN_MLB_DISK_CACHE.exists():
+            disk_cache = json.loads(ESPN_MLB_DISK_CACHE.read_text(encoding="utf-8"))
+            cache_age = time.time() - ESPN_MLB_DISK_CACHE.stat().st_mtime
+    except Exception:
+        disk_cache = {}
+    if disk_cache and cache_age is not None and cache_age < 12 * 60 * 60:
+        ESPN_MLB_IMAGE_MAP_CACHE = disk_cache
+        print(f"[render_png] ESPN MLB headshots loaded from cache: {len(disk_cache)}")
+        return disk_cache
 
     team_slugs = [
         "ari", "atl", "bal", "bos", "chc", "chw", "cin", "cle", "col", "det",
@@ -399,18 +413,26 @@ def _load_espn_mlb_image_map() -> dict[str, str]:
         "Accept": "application/json",
         "Referer": "https://www.espn.com/",
     }
-    image_map: dict[str, str] = {}
+    # Begin with the last successful map so a temporary ESPN failure cannot
+    # make previously available players disappear from a graphic.
+    image_map: dict[str, str] = dict(disk_cache)
     failed_teams: list[str] = []
     for team in team_slugs:
         url = (
             "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/teams/"
             f"{team}/roster"
         )
-        try:
-            req = Request(url, headers=headers)
-            with urlopen(req, timeout=20) as response:
-                payload = json.load(response)
-        except Exception:
+        payload = None
+        for attempt in range(1, 4):
+            try:
+                req = Request(url, headers=headers)
+                with urlopen(req, timeout=20) as response:
+                    payload = json.load(response)
+                break
+            except Exception:
+                if attempt < 3:
+                    time.sleep(0.6 * attempt)
+        if payload is None:
             failed_teams.append(team)
             continue
         for group in payload.get("athletes", []):
@@ -419,6 +441,14 @@ def _load_espn_mlb_image_map() -> dict[str, str]:
                 headshot = (player.get("headshot") or {}).get("href", "").strip()
                 if name and headshot:
                     image_map[name] = headshot
+
+    try:
+        ESPN_MLB_DISK_CACHE.write_text(
+            json.dumps(image_map, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"[render_png] ESPN cache write failed: {e}")
 
     ESPN_MLB_IMAGE_MAP_CACHE = image_map
     print(f"[render_png] ESPN MLB headshots loaded: {len(image_map)}")
