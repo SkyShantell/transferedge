@@ -558,6 +558,29 @@ def dismiss_home_popups(page, log) -> None:
     except PlaywrightTimeoutError:
         log("Discord link prompt did not appear")
 
+    # PropsEdge can stack a tutorial chooser and an update announcement. The
+    # older targeted locators do not always dismiss every layer, leaving a
+    # transparent backdrop over the sport and filter controls. Close any
+    # remaining visible modal Close button, one layer at a time.
+    for _ in range(6):
+        remaining_close_buttons = page.get_by_role(
+            "button", name="Close", exact=True
+        )
+        closed_layer = False
+        for index in range(remaining_close_buttons.count()):
+            close_button = remaining_close_buttons.nth(index)
+            try:
+                if close_button.is_visible(timeout=300):
+                    close_button.click(timeout=1500, force=True)
+                    page.wait_for_timeout(300)
+                    closed_layer = True
+                    log("Closed remaining blocking announcement")
+                    break
+            except PlaywrightTimeoutError:
+                continue
+        if not closed_layer:
+            break
+
     # Wait for backdrop to clear so next click is not intercepted.
     backdrop = page.locator("div.fixed.inset-0.z-\\[100\\]").first
     try:
@@ -2012,22 +2035,45 @@ def click_sport_and_scrape(
                     continue
 
     enable_toggle("Show alt lines", required=False)
-    if not enable_toggle(creature_toggle, required=False):
+    creature_enabled = enable_toggle(creature_toggle, required=False)
+    if not creature_enabled:
         open_modifiers_panel(log)
-        enable_toggle(creature_toggle, required=False)
+        creature_enabled = enable_toggle(creature_toggle, required=False)
+    if not creature_enabled:
+        raise RuntimeError(f"Could not select {creature_toggle} in the Modifier filter")
 
     show_results_btn = page.get_by_role("button", name=re.compile(r"^Show [\d,]+ results$", re.IGNORECASE)).first
-    show_results_btn.wait_for(state="visible", timeout=15000)
     results_value = 0
     results_text = ""
+    show_results_available = False
+    try:
+        show_results_btn.wait_for(state="visible", timeout=3000)
+        show_results_available = True
+    except PlaywrightTimeoutError:
+        log("Filters auto-apply; Show results button is not used by the current UI")
+
     for _ in range(80):
         try:
             page.wait_for_load_state("networkidle", timeout=2000)
         except PlaywrightTimeoutError:
             pass
 
-        results_text = (show_results_btn.inner_text() or "").strip()
-        match = re.search(r"Show\s+([\d,]+)\s+results", results_text, re.IGNORECASE)
+        if show_results_available:
+            results_text = (show_results_btn.inner_text() or "").strip()
+            match = re.search(r"Show\s+([\d,]+)\s+results", results_text, re.IGNORECASE)
+        else:
+            count_text = page.get_by_text(
+                re.compile(r"^Showing\s+[\d,]+\s+of\s+[\d,]+\s+projections$", re.IGNORECASE)
+            ).first
+            try:
+                results_text = (count_text.inner_text(timeout=1000) or "").strip()
+            except PlaywrightTimeoutError:
+                results_text = ""
+            match = re.search(
+                r"Showing\s+([\d,]+)\s+of\s+[\d,]+\s+projections",
+                results_text,
+                re.IGNORECASE,
+            )
         if match:
             results_value = int(match.group(1).replace(",", ""))
             if results_value > 0:
@@ -2037,13 +2083,16 @@ def click_sport_and_scrape(
 
     if results_value > 0:
         log(f"Results count loaded: {results_value:,}")
-        show_results_btn.click(timeout=5000, force=True)
-        log("Clicked Show results")
-        try:
-            page.wait_for_load_state("domcontentloaded", timeout=10000)
-            page.wait_for_load_state("networkidle", timeout=10000)
-        except PlaywrightTimeoutError:
-            log("Load wait after Show results click timed out; continuing")
+        if show_results_available:
+            show_results_btn.click(timeout=5000, force=True)
+            log("Clicked Show results")
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=10000)
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except PlaywrightTimeoutError:
+                log("Load wait after Show results click timed out; continuing")
+        else:
+            log("Filtered results applied automatically")
 
         projections_table = page.locator("#tour-projections-table").first
         projections_table.wait_for(state="visible", timeout=20000)
@@ -2111,8 +2160,7 @@ def click_sport_and_scrape(
         log(f"Total extracted rows across all props: {len(all_rows)}")
         db_insert_props_rows(log, run_id, output_suffix, all_rows, sport_cfg)
     else:
-        log(f"Results count still zero/unparsed: {results_text}")
-        log("Skipping Show results click because count is not ready")
+        raise RuntimeError(f"Filtered results count still zero/unparsed: {results_text}")
 
 
 def main() -> None:
