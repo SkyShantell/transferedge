@@ -966,6 +966,7 @@ def extract_projections_table(page, log, target_prop: str, expected_count: int, 
     log(f"Using indexed desktop row selector: {rows_selector}")
 
     seen_by_index: dict[int, dict] = {}
+    rejected_row_debug: list[dict] = []
 
     def read_mounted_rows() -> list[dict]:
         """Take one atomic DOM snapshot so virtualization cannot detach locators mid-row."""
@@ -1025,6 +1026,7 @@ def extract_projections_table(page, log, target_prop: str, expected_count: int, 
                     const sznCell = cells[7] || null;
 
                     return {
+                        tagName: row.tagName,
                         dataIndex: Number(row.getAttribute('data-index')),
                         href,
                         playerName: textOf(player) || (playerImage ? playerImage.getAttribute('alt') || '' : ''),
@@ -1036,6 +1038,7 @@ def extract_projections_table(page, log, target_prop: str, expected_count: int, 
                         H2H: percentOf(h2hCell),
                         SZN: percentOf(sznCell),
                         rowText: (row.innerText || row.textContent || '').replace(/\\s+/g, ' ').trim(),
+                        outerHTML: row.outerHTML,
                     };
                 }).filter((r) => Number.isFinite(r.dataIndex) && r.href)
                 """,
@@ -1072,6 +1075,19 @@ def extract_projections_table(page, log, target_prop: str, expected_count: int, 
             # A mounted row can briefly exist before React finishes hydrating it.
             # Do not mark it collected until the fields we actually need are present.
             if not href or not player_name or not prop_text:
+                if len(rejected_row_debug) < 5:
+                    debug_row = {
+                        "tagName": item.get("tagName"),
+                        "dataIndex": data_index,
+                        "href": href,
+                        "playerName": player_name,
+                        "propText": prop_text,
+                        "lineText": line_text,
+                        "rowText": row_text,
+                        "outerHTML": str(item.get("outerHTML") or ""),
+                    }
+                    rejected_row_debug.append(debug_row)
+                    log("DOM DEBUG rejected row " + json.dumps(debug_row, ensure_ascii=False))
                 continue
 
             trends = [
