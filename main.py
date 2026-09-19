@@ -966,7 +966,6 @@ def extract_projections_table(page, log, target_prop: str, expected_count: int, 
     log(f"Using indexed desktop row selector: {rows_selector}")
 
     seen_by_index: dict[int, dict] = {}
-    rejected_row_debug: list[dict] = []
 
     def read_mounted_rows() -> list[dict]:
         """Take one atomic DOM snapshot so virtualization cannot detach locators mid-row."""
@@ -981,8 +980,6 @@ def extract_projections_table(page, log, target_prop: str, expected_count: int, 
                     };
 
                     const href = row.getAttribute('href') || '';
-                    const projectionRow = row.querySelector('#tour-projection-row');
-                    const cells = projectionRow ? Array.from(projectionRow.children) : [];
                     const playerCell = row.querySelector('#tour-cell-player');
 
                     // PropsEdge changed the inner typography/classes while keeping the
@@ -990,20 +987,19 @@ def extract_projections_table(page, log, target_prop: str, expected_count: int, 
                     // old selectors as compatibility fallbacks.
                     const player =
                         (playerCell && playerCell.querySelector('span.text-sm.font-semibold.text-white.truncate')) ||
+                        row.querySelector('span.text-sm.font-semibold.text-white.truncate') ||
                         row.querySelector('span.text-base.font-medium.text-gray-100');
-                    const playerImage = playerCell
-                        ? Array.from(playerCell.querySelectorAll('img[alt]')).find(
+                    const playerImage = Array.from(
+                        (playerCell || row).querySelectorAll('img[alt]')
+                    ).find(
                             (img) => img.getAttribute('alt') !== 'Team logo'
-                        )
-                        : null;
+                        );
                     const lineSpan =
                         (playerCell && playerCell.querySelector('span.shrink-0.whitespace-nowrap.text-sm.font-semibold.text-gray-100')) ||
                         Array.from(row.querySelectorAll('span')).find(
                             (s) => /^(Over|Under)\\s+-?\\d+(?:\\.\\d+)?$/i.test(textOf(s))
                         );
-                    const playerSpans = playerCell
-                        ? Array.from(playerCell.querySelectorAll('span'))
-                        : [];
+                    const playerSpans = Array.from((playerCell || row).querySelectorAll('span'));
                     const prop = lineSpan
                         ? playerSpans.slice(playerSpans.indexOf(lineSpan) + 1).find((s) => {
                             const value = textOf(s);
@@ -1019,14 +1015,16 @@ def extract_projections_table(page, log, target_prop: str, expected_count: int, 
                     // Read the trend cells directly. The row now contains a separate
                     // Chance percentage before L5, so scraping every % from rowText would
                     // shift the L5/L10/L20/H2H/SZN values.
-                    const l5Cell = row.querySelector('#tour-cell-all-odds') || cells[3] || null;
-                    const l10Cell = row.querySelector('#tour-cell-trends') || cells[4] || null;
-                    const l20Cell = cells[5] || null;
-                    const h2hCell = cells[6] || null;
-                    const sznCell = cells[7] || null;
+                    const trendCells = Array.from(row.querySelectorAll('div[style*="width: 60px"]'))
+                        .filter((el) => /\\b\\d+(?:\\.\\d+)?%/.test(textOf(el)))
+                        .slice(-5);
+                    const l5Cell = trendCells[0] || null;
+                    const l10Cell = trendCells[1] || null;
+                    const l20Cell = trendCells[2] || null;
+                    const h2hCell = trendCells[3] || null;
+                    const sznCell = trendCells[4] || null;
 
                     return {
-                        tagName: row.tagName,
                         dataIndex: Number(row.getAttribute('data-index')),
                         href,
                         playerName: textOf(player) || (playerImage ? playerImage.getAttribute('alt') || '' : ''),
@@ -1038,7 +1036,6 @@ def extract_projections_table(page, log, target_prop: str, expected_count: int, 
                         H2H: percentOf(h2hCell),
                         SZN: percentOf(sznCell),
                         rowText: (row.innerText || row.textContent || '').replace(/\\s+/g, ' ').trim(),
-                        outerHTML: row.outerHTML,
                     };
                 }).filter((r) => Number.isFinite(r.dataIndex) && r.href)
                 """,
@@ -1075,19 +1072,6 @@ def extract_projections_table(page, log, target_prop: str, expected_count: int, 
             # A mounted row can briefly exist before React finishes hydrating it.
             # Do not mark it collected until the fields we actually need are present.
             if not href or not player_name or not prop_text:
-                if len(rejected_row_debug) < 5:
-                    debug_row = {
-                        "tagName": item.get("tagName"),
-                        "dataIndex": data_index,
-                        "href": href,
-                        "playerName": player_name,
-                        "propText": prop_text,
-                        "lineText": line_text,
-                        "rowText": row_text,
-                        "outerHTML": str(item.get("outerHTML") or ""),
-                    }
-                    rejected_row_debug.append(debug_row)
-                    log("DOM DEBUG rejected row " + json.dumps(debug_row, ensure_ascii=False))
                 continue
 
             trends = [
