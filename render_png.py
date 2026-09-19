@@ -1151,20 +1151,15 @@ def _render_png_fallback(cfg: ModeCfg, rows: list[dict[str, str]], out_png: Path
             icon_source = icon_source.crop(icon_bbox)
         # Intentionally oversized: clip it to the title panel so the character
         # fills the right side without covering the title or table headings.
-        # Pillow's thumbnail() never enlarges small source art, so resize it
-        # explicitly to make the visible character genuinely much larger.
-        icon_scale = min(330 / icon_source.width, 300 / icon_source.height)
+        # Explicitly upscale the small source art to a balanced header size.
+        icon_scale = min(155 / icon_source.width, 150 / icon_source.height)
         mode_icon = icon_source.resize(
             (max(1, int(icon_source.width * icon_scale)), max(1, int(icon_source.height * icon_scale))),
             Image.Resampling.LANCZOS,
         )
-        icon_x = 790 - mode_icon.width
+        icon_x = 785 - mode_icon.width
         icon_y = 118 + (162 - mode_icon.height) // 2
-        crop_top = max(0, 118 - icon_y)
-        crop_bottom = min(mode_icon.height, 280 - icon_y)
-        if crop_bottom > crop_top:
-            visible_icon = mode_icon.crop((0, crop_top, mode_icon.width, crop_bottom))
-            img.alpha_composite(visible_icon, (icon_x, max(118, icon_y)))
+        img.alpha_composite(mode_icon, (icon_x, icon_y))
 
     # Sky Knows Bets logo and PrizePicks promo code.
     logo_path = TEMPLATE_DIR / "SKB_LOGO_Transparent.PNG"
