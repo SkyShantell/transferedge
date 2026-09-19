@@ -9,7 +9,6 @@ import re
 import time
 import difflib
 import os
-from collections import deque
 from datetime import datetime
 from io import BytesIO
 from dataclasses import dataclass
@@ -87,7 +86,6 @@ RIGHT_BADGE_Y = 22
 PLAYER_IMAGE_MAP: dict[str, str] = {}
 PLAYER_IMAGE_KEYS: list[str] = []
 PLAYER_LOCAL_FACE_MAP: dict[str, Path] = {}
-PLAYER_AVATAR_CACHE: dict[str, Image.Image] = {}
 IMAGE_FAILURE_LOG = OUT_DIR / "image_failures.log"
 MISSING_LOOKUP_LOG = OUT_DIR / "missing_in_lookup.log"
 
@@ -682,55 +680,6 @@ def _load_badge_icon(mode: str, side: str = "right") -> Image.Image | None:
         return None
 
 
-def _remove_connected_neutral_background(image: Image.Image) -> Image.Image:
-    """Remove only light/neutral background pixels connected to an image edge."""
-    im = image.convert("RGBA")
-    px = im.load()
-    width, height = im.size
-    if width < 2 or height < 2:
-        return im
-
-    corners = [px[0, 0][:3], px[width - 1, 0][:3], px[0, height - 1][:3], px[width - 1, height - 1][:3]]
-
-    def removable(x: int, y: int) -> bool:
-        r, g, b, a = px[x, y]
-        if a == 0:
-            return True
-        brightness = (r + g + b) / 3.0
-        neutral = max(r, g, b) - min(r, g, b) <= 34
-        near_corner = min(
-            ((r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2) ** 0.5
-            for cr, cg, cb in corners
-        ) <= 72
-        return (neutral and brightness >= 145) or near_corner
-
-    queue: deque[tuple[int, int]] = deque()
-    seen: set[tuple[int, int]] = set()
-    for x in range(width):
-        queue.append((x, 0))
-        queue.append((x, height - 1))
-    for y in range(height):
-        queue.append((0, y))
-        queue.append((width - 1, y))
-
-    while queue:
-        x, y = queue.popleft()
-        if (x, y) in seen or not removable(x, y):
-            continue
-        seen.add((x, y))
-        r, g, b, _ = px[x, y]
-        px[x, y] = (r, g, b, 0)
-        if x > 0:
-            queue.append((x - 1, y))
-        if x + 1 < width:
-            queue.append((x + 1, y))
-        if y > 0:
-            queue.append((x, y - 1))
-        if y + 1 < height:
-            queue.append((x, y + 1))
-    return im
-
-
 def _paste_player_avatar(base: Image.Image, row: dict[str, str], pbox: dict[str, float], mode: str) -> None:
     name_key = (row.get("player_name", "") or "").strip()
     _debug(f"[render_png][{mode}] player='{name_key}' start")
@@ -760,16 +709,11 @@ def _paste_player_avatar(base: Image.Image, row: dict[str, str], pbox: dict[str,
     if not img_path:
         _debug(f"[render_png][{mode}] player='{name_key}' skip=no_image")
         return
-    cache_key = str(img_path)
-    cached_avatar = PLAYER_AVATAR_CACHE.get(cache_key)
-    if cached_avatar is not None:
-        avatar = cached_avatar.copy()
-    else:
-        try:
-            avatar = Image.open(img_path).convert("RGBA")
-        except Exception:
-            _debug(f"[render_png][{mode}] player='{name_key}' skip=bad_image_file")
-            return
+    try:
+        avatar = Image.open(img_path).convert("RGBA")
+    except Exception:
+        _debug(f"[render_png][{mode}] player='{name_key}' skip=bad_image_file")
+        return
 
     # Keep original ESPN canvas framing for consistent row-to-row alignment.
 
@@ -780,8 +724,6 @@ def _paste_player_avatar(base: Image.Image, row: dict[str, str], pbox: dict[str,
     scale = target_h / max(1, avatar.height)
     target_w = int(avatar.width * scale)
     avatar = avatar.resize((target_w, target_h), resample_lanczos)
-    avatar = _remove_connected_neutral_background(avatar)
-    PLAYER_AVATAR_CACHE[cache_key] = avatar.copy()
 
     # Use a fixed anchor in the left player-image column.
     # Text box X from templates is not reliable for image placement.
@@ -1125,7 +1067,13 @@ def _render_png_fallback(cfg: ModeCfg, rows: list[dict[str, str]], out_png: Path
     sport = (os.getenv("PROPSEDGE_SPORT") or os.getenv("SPORT") or "MLB").strip().upper()
     date_text = datetime.now().strftime("%m/%d/%Y").lstrip("0").replace("/0", "/")
     draw.rounded_rectangle((38, 35, 330, 92), 25, fill=charcoal)
-    draw.text((68, 49), f"{sport}  •  PROPS EDGE", font=f_top, fill=white)
+    prizepicks_path = TEMPLATE_DIR / "PrizePicks_Logo.png"
+    if prizepicks_path.exists():
+        prizepicks_logo = contain(Image.open(prizepicks_path), (48, 48))
+        img.alpha_composite(prizepicks_logo, (55, 39 + (48 - prizepicks_logo.height) // 2))
+        draw.text((116, 49), sport, font=f_top, fill=white)
+    else:
+        draw.text((68, 49), sport, font=f_top, fill=white)
     draw.text((357, 53), date_text, font=f_date, fill=(63, 67, 72, 255))
 
     # Header and mode icon.
@@ -1145,15 +1093,15 @@ def _render_png_fallback(cfg: ModeCfg, rows: list[dict[str, str]], out_png: Path
         mode_icon = contain(Image.open(icon_path), (110, 96))
         img.alpha_composite(mode_icon, (730 - mode_icon.width // 2, 130))
 
-    # Sky Knows Bets logo and handle.
+    # Sky Knows Bets logo and PrizePicks promo code.
     logo_path = TEMPLATE_DIR / "SKB_LOGO_Transparent.PNG"
     if logo_path.exists():
         logo = contain(Image.open(logo_path), (230, 215))
         img.alpha_composite(logo, (825 + (230 - logo.width) // 2, 34))
-        handle_font = _font(14)
-        handle = "@skyknowsbets"
-        hx = 940 - draw.textlength(handle, font=handle_font) / 2
-        draw.text((hx, 253), handle, font=handle_font, fill=(45, 47, 50, 255))
+        promo_font = _font(13)
+        promo = "USE CODE: SCRAP ON PRIZEPICKS"
+        px = 940 - draw.textlength(promo, font=promo_font) / 2
+        draw.text((px, 253), promo, font=promo_font, fill=(30, 32, 35, 255))
 
     for label, x in (("PLAYER", 185), ("PROP", 470), ("TENDENCY", 710), ("MODEL", 932)):
         draw.text((x, 294), label, font=f_col, fill=(72, 76, 80, 255), anchor="mm")
